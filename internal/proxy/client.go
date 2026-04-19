@@ -414,8 +414,27 @@ func (s *session) dispatch(m wire.Message) error {
 		return s.handleDescribeOrClose(m, true)
 	case wire.FeClose:
 		return s.handleDescribeOrClose(m, false)
-	case wire.FeExecute, wire.FeSync, wire.FeFlush, wire.FeCopyData, wire.FeCopyDone, wire.FeCopyFail:
-		return s.forwardToBackend(m)
+	case wire.FeSync:
+		// Sync flushes pending extended-query responses and ends the
+		// implicit transaction. We forward it AND pump responses back to
+		// the client until ReadyForQuery.
+		if err := s.forwardToBackend(m); err != nil {
+			return err
+		}
+		return s.relayUntilReady()
+	case wire.FeExecute, wire.FeFlush, wire.FeCopyData, wire.FeCopyDone, wire.FeCopyFail:
+		if err := s.forwardToBackend(m); err != nil {
+			return err
+		}
+		// Flush causes the server to send any pending responses but does NOT
+		// include ReadyForQuery. Execute alone before Sync behaves similarly.
+		// We pump whatever bytes the backend is willing to produce right
+		// now, bounded by a short read deadline, so GUIs that interleave
+		// Flush with small reads still make progress.
+		if m.Type == wire.FeFlush {
+			return s.relayPending()
+		}
+		return nil
 	}
 	return writeErrorToClient(s.cw, "0A000", fmt.Sprintf("unsupported message type %q", m.Type))
 }
@@ -424,6 +443,12 @@ func (s *session) handleSimpleQuery(m wire.Message) error {
 	sql, err := wire.ParseQuery(m.Body)
 	if err != nil {
 		return writeErrorToClient(s.cw, "08P01", "invalid Query message")
+	}
+	// Intercept read-only admin SHOW commands so they work from any database
+	// and any user without having to connect to the admin console.
+	if isReadOnlyAdminQuery(sql) {
+		console := admin.New(s.p)
+		return console.HandleQuery(nil, s.cw, sql)
 	}
 	a := classify.Analyze(sql)
 	// Track counters
@@ -556,6 +581,43 @@ func (s *session) forwardToBackend(m wire.Message) error {
 	return s.backend.Writer.Flush()
 }
 
+// relayPending pumps whatever messages the backend has buffered with a
+// short read deadline, stopping when the backend would block. Used after
+// a Flush where ReadyForQuery is not expected.
+func (s *session) relayPending() error {
+	if s.backend == nil {
+		return nil
+	}
+	for {
+		if tcp, ok := s.backend.Conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+			_ = tcp.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+		}
+		m, err := s.backend.Reader.ReadMessage()
+		if err != nil {
+			if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
+				// Reset deadline and return control to the session loop.
+				if tcp, ok := s.backend.Conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+					_ = tcp.SetReadDeadline(time.Time{})
+				}
+				return s.cw.Flush()
+			}
+			return err
+		}
+		if err := s.cw.WriteMessage(m.Type, m.Body); err != nil {
+			return err
+		}
+		if m.Type == wire.BeReadyForQuery {
+			status, _ := wire.ParseReadyForQuery(m.Body)
+			s.inTx = status == wire.TxInBlock || status == wire.TxFailed
+			s.onReadyForQuery()
+			if tcp, ok := s.backend.Conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+				_ = tcp.SetReadDeadline(time.Time{})
+			}
+			return s.cw.Flush()
+		}
+	}
+}
+
 // relayUntilReady copies messages from backend to client, stopping after the
 // next ReadyForQuery. It also tracks transaction state and parameter status
 // so we can swap backends between transactions.
@@ -645,6 +707,27 @@ func firstWord(s string) string {
 		i++
 	}
 	return s[:i]
+}
+
+// isReadOnlyAdminQuery reports whether sql is one of the SHOW commands
+// Poolsmith exposes via the admin console. These are safe to answer from
+// any client session — they only read internal state.
+func isReadOnlyAdminQuery(sql string) bool {
+	s := strings.ToUpper(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(sql), ";")))
+	switch s {
+	case "SHOW POOLS", "SHOW DATABASES", "SHOW SERVERS",
+		"SHOW STATS", "SHOW TOTALS", "SHOW CLIENTS",
+		"SHOW CONFIG", "SHOW VERSION":
+		return true
+	}
+	// Accept trailing whitespace/variants like "SHOW POOLS ".
+	for _, p := range []string{"SHOW POOLS", "SHOW DATABASES", "SHOW SERVERS",
+		"SHOW STATS", "SHOW TOTALS", "SHOW CLIENTS", "SHOW CONFIG", "SHOW VERSION"} {
+		if s == p || strings.HasPrefix(s, p+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 func isEOF(err error) bool {
