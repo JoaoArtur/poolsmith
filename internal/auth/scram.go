@@ -292,6 +292,9 @@ func ClientAuthSCRAM(r *wire.Reader, w *wire.Writer, user, password string) erro
 	if err != nil {
 		return err
 	}
+	if msg.Type == wire.BeErrorResponse {
+		return fmt.Errorf("scram: server rejected client-first: %s", wire.FormatError(wire.ParseErrorFields(msg.Body)))
+	}
 	if msg.Type != wire.BeAuthentication {
 		return fmt.Errorf("scram: expected Authentication, got %q", msg.Type)
 	}
@@ -343,6 +346,9 @@ func ClientAuthSCRAM(r *wire.Reader, w *wire.Writer, user, password string) erro
 	msg, err = r.ReadMessage()
 	if err != nil {
 		return err
+	}
+	if msg.Type == wire.BeErrorResponse {
+		return fmt.Errorf("scram: server rejected client-final: %s", wire.FormatError(wire.ParseErrorFields(msg.Body)))
 	}
 	if msg.Type != wire.BeAuthentication {
 		return fmt.Errorf("scram: expected Authentication, got %q", msg.Type)
