@@ -70,8 +70,7 @@ metadata:
   name: poolsmith
 spec:
   type: ClusterIP
-  ipFamilyPolicy: SingleStack
-  ipFamilies: [IPv4]
+  clusterIP: None
   selector:
     app: poolsmith
   ports:

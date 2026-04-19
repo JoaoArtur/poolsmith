@@ -95,7 +95,10 @@ func parseUserlist(r io.Reader) (map[string]string, error) {
 		}
 		u, pw, err := splitUserLine(raw)
 		if err != nil {
-			return nil, fmt.Errorf("userlist: line %d: %w", line, err)
+			return nil, fmt.Errorf("userlist: line %d: %w (got %q — expected \"user\" \"password\")", line, err, raw)
+		}
+		if pw == "" {
+			return nil, fmt.Errorf("userlist: line %d: empty password for user %q", line, u)
 		}
 		m[u] = pw
 	}
