@@ -800,26 +800,23 @@ func filterStartupParams(in map[string]string) map[string]string {
 	return out
 }
 
-// stickyParamNames are the startup parameters that materially change session
-// semantics. Backends with different values for any of these can't be shared
-// — search_path selects schemas, client_encoding converts bytes, TimeZone
-// rewrites TIMESTAMPTZ, options can carry arbitrary -c flags, etc.
+// stickyParamNames are the startup parameters whose value, if different
+// between two clients, MUST force them onto separate pools — getting them
+// wrong on a reused backend would corrupt bytes or silently return rows
+// from the wrong schema.
 //
-// Parameters NOT in this set (application_name, user-agent-ish fields) are
-// forwarded to upstream but do not partition the pool. That keeps the
-// multiplexing tight even when apps per-pod send a unique application_name.
+// Deliberately small: clients frequently send volatile `options=`, per-pod
+// `application_name`, or fleet-specific `TimeZone` values that have no
+// effect on query correctness. Forcing a separate pool for each would
+// fragment the server-side connection count back to one-per-client.
+//
+// Anything NOT listed here is still forwarded verbatim on the upstream
+// StartupMessage; it just doesn't partition the pool map.
 var stickyParamNames = map[string]struct{}{
 	"search_path":                 {},
-	"options":                     {},
 	"client_encoding":             {},
-	"datestyle":                   {},
-	"intervalstyle":               {},
-	"timezone":                    {},
-	"extra_float_digits":          {},
 	"bytea_output":                {},
 	"standard_conforming_strings": {},
-	"default_transaction_isolation": {},
-	"default_transaction_read_only": {},
 }
 
 // startupParamsSig returns a stable 16-hex-digit signature for the subset of

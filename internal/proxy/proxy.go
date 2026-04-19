@@ -230,6 +230,11 @@ func (p *Proxy) poolFor(k pool.Key, db *config.Database, extraParams map[string]
 		Metrics:        p.metrics,
 	})
 	p.pools[k] = pl
+	p.log.Info("proxy: new pool",
+		"key", k.String(),
+		"pool_size", size,
+		"total_pools", len(p.pools),
+		"startup_params", extraParams)
 	return pl, nil
 }
 
