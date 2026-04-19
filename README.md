@@ -157,7 +157,7 @@ developer laptop (Apple M4, Docker Desktop Postgres 16, Poolsmith with
 
 ```bash
 cd scripts
-DSN="postgres://drivio:drivio123@localhost:6432/drivio" \
+DSN="postgres://app:app-password@localhost:6432/app" \
   CONCURRENCY=300 DURATION_SEC=20 \
   node stress-test.js
 ```
@@ -181,7 +181,7 @@ Mid-stress, `SHOW POOLS` and `SHOW CLIENTS` (queried concurrently via
 ```
  database |  user  | server  | cl_active | cl_waiting | sv_active | sv_idle | sv_total |  pool_mode
 ----------+--------+---------+-----------+------------+-----------+---------+----------+-------------
- drivio   | drivio | primary |    30     |    264     |    30     |   0     |    30    | transaction
+ app      | app    | primary |    30     |    264     |    30     |   0     |    30    | transaction
 
  active_clients
 ----------------
