@@ -48,7 +48,7 @@ spec:
     spec:
       containers:
         - name: poolsmith
-          image: ghcr.io/joaoartur/poolsmith:latest
+          image: registry.gitlab.com/poolsmith/poolsmith:latest
           args: ["-config", "/etc/poolsmith/poolsmith.ini"]
           ports:
             - containerPort: 6432

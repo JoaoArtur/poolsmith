@@ -227,37 +227,39 @@ backend. Raise `pool_size` before raising `max_client_conn`.
 
 ## Docker image
 
-A minimal multi-stage Dockerfile is included — builder runs the Go toolchain,
-final stage is `scratch` with just the stripped binary. The resulting image
-is **~4 MB**.
+A pre-built image is published to GitLab Container Registry. It's a
+`scratch`-based **~4 MB** image — no shell, no libc, just the stripped
+static binary.
 
 ```bash
-docker build -t poolsmith:dev --build-arg VERSION=0.1.0 .
+docker pull registry.gitlab.com/poolsmith/poolsmith:latest
+
 docker run --rm -p 6432:6432 \
   -v "$PWD/config/poolsmith.ini.example:/etc/poolsmith/poolsmith.ini:ro" \
   -v "$PWD/config/userlist.txt.example:/etc/poolsmith/userlist.txt:ro" \
-  poolsmith:dev
+  registry.gitlab.com/poolsmith/poolsmith:latest
 ```
 
-Push to your registry:
+Tags:
 
-```bash
-docker tag poolsmith:dev ghcr.io/joaoartur/poolsmith:0.1.0
-docker push ghcr.io/joaoartur/poolsmith:0.1.0
-```
+| Tag       | Meaning                                              |
+|-----------|------------------------------------------------------|
+| `latest`  | Tracks the tip of `master`.                          |
+| `0.1`     | Pinned release.                                      |
 
 ## Kubernetes
 
-A single-file manifest is in `deploy/k8s/poolsmith.yaml` — ConfigMap + Secret
-+ Deployment (2 replicas) + Service. Edit the INI inline, set real passwords
-in the Secret, then:
+A single-file manifest is in `deploy/k8s/poolsmith.yaml` — ConfigMap +
+Secret + Deployment (2 replicas, `registry.gitlab.com/poolsmith/poolsmith:latest`)
++ Service on port **5432**. Edit the INI inline, set real passwords in the
+Secret, then:
 
 ```bash
 kubectl apply -f deploy/k8s/poolsmith.yaml
 ```
 
-The Service publishes on port **5432** so apps connect as if it were
-Postgres. Scale with `kubectl scale deploy/poolsmith --replicas=N`.
+Apps connect to `poolsmith.<namespace>.svc:5432` as if it were Postgres.
+Scale with `kubectl scale deploy/poolsmith --replicas=N`.
 
 ## Caveats
 

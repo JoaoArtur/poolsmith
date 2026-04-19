@@ -7,3 +7,5 @@
 .claude
 node_modules/
 .env
+
+scripts/deploy.sh
