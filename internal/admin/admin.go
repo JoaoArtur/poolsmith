@@ -36,6 +36,9 @@ type Registry interface {
 // Console is an admin session handler bound to one client.
 type Console struct {
 	reg Registry
+	// suppressReady skips the trailing ReadyForQuery frame in finish().
+	// Used by HandleExtendedExecute where the caller emits RFQ on Sync.
+	suppressReady bool
 }
 
 // New returns a Console reading from reg.
@@ -50,12 +53,21 @@ func IsAdminDB(dbName string) bool {
 	return false
 }
 
+// HandleExtendedExecute runs an admin query during an extended-protocol
+// Execute: it emits RowDescription + DataRow(s) + CommandComplete but NOT
+// ReadyForQuery (the session loop will emit RFQ when Sync arrives).
+func (c *Console) HandleExtendedExecute(w *wire.Writer, sql string) error {
+	c.suppressReady = true
+	defer func() { c.suppressReady = false }()
+	return c.HandleQuery(nil, w, sql)
+}
+
 // HandleQuery processes one simple-query and writes the response to w.
 // Returns error only on I/O failure — SQL errors are sent as ErrorResponse.
 func (c *Console) HandleQuery(ctx context.Context, w *wire.Writer, sql string) error {
 	sql = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(sql), ";"))
 	if sql == "" {
-		return finish(w, "")
+		return c.finishMethod(w, "")
 	}
 	upper := strings.ToUpper(sql)
 	switch {
@@ -75,24 +87,24 @@ func (c *Console) HandleQuery(ctx context.Context, w *wire.Writer, sql string) e
 		return c.showVersion(w)
 	case upper == "PAUSE":
 		if err := c.reg.Pause(); err != nil {
-			return writeErr(w, "0A000", err.Error())
+			return c.writeErr(w, "0A000", err.Error())
 		}
-		return finish(w, "PAUSE")
+		return c.finishMethod(w, "PAUSE")
 	case upper == "RESUME":
 		if err := c.reg.Resume(); err != nil {
-			return writeErr(w, "0A000", err.Error())
+			return c.writeErr(w, "0A000", err.Error())
 		}
-		return finish(w, "RESUME")
+		return c.finishMethod(w, "RESUME")
 	case upper == "RELOAD":
 		if err := c.reg.Reload(); err != nil {
-			return writeErr(w, "0A000", err.Error())
+			return c.writeErr(w, "0A000", err.Error())
 		}
-		return finish(w, "RELOAD")
+		return c.finishMethod(w, "RELOAD")
 	case upper == "SHUTDOWN":
 		c.reg.Shutdown()
-		return finish(w, "SHUTDOWN")
+		return c.finishMethod(w, "SHUTDOWN")
 	}
-	return writeErr(w, "42601", fmt.Sprintf("unknown admin command: %s", sql))
+	return c.writeErr(w, "42601", fmt.Sprintf("unknown admin command: %s", sql))
 }
 
 // ---- SHOW implementations ----
@@ -112,7 +124,7 @@ func (c *Console) showPools(w *wire.Writer) error {
 			return err
 		}
 	}
-	return finish(w, "SHOW")
+	return c.finishMethod(w, "SHOW")
 }
 
 func (c *Console) showDatabases(w *wire.Writer) error {
@@ -133,7 +145,7 @@ func (c *Console) showDatabases(w *wire.Writer) error {
 			return err
 		}
 	}
-	return finish(w, "SHOW")
+	return c.finishMethod(w, "SHOW")
 }
 
 func (c *Console) showServers(w *wire.Writer) error {
@@ -156,7 +168,7 @@ func (c *Console) showServers(w *wire.Writer) error {
 			return err
 		}
 	}
-	return finish(w, "SHOW")
+	return c.finishMethod(w, "SHOW")
 }
 
 func (c *Console) showStats(w *wire.Writer) error {
@@ -170,7 +182,7 @@ func (c *Console) showStats(w *wire.Writer) error {
 			return err
 		}
 	}
-	return finish(w, "SHOW")
+	return c.finishMethod(w, "SHOW")
 }
 
 func (c *Console) showClients(w *wire.Writer) error {
@@ -182,7 +194,7 @@ func (c *Console) showClients(w *wire.Writer) error {
 	if err := writeDataRow(w, row); err != nil {
 		return err
 	}
-	return finish(w, "SHOW")
+	return c.finishMethod(w, "SHOW")
 }
 
 func (c *Console) showConfig(w *wire.Writer) error {
@@ -206,7 +218,7 @@ func (c *Console) showConfig(w *wire.Writer) error {
 			return err
 		}
 	}
-	return finish(w, "SHOW")
+	return c.finishMethod(w, "SHOW")
 }
 
 func (c *Console) showVersion(w *wire.Writer) error {
@@ -217,7 +229,7 @@ func (c *Console) showVersion(w *wire.Writer) error {
 	if err := writeDataRow(w, []string{"Poolsmith 0.1 (postgres-wire v3)"}); err != nil {
 		return err
 	}
-	return finish(w, "SHOW")
+	return c.finishMethod(w, "SHOW")
 }
 
 // ---- helpers ----
@@ -284,11 +296,27 @@ func finish(w *wire.Writer, tag string) error {
 	return w.Flush()
 }
 
-func writeErr(w *wire.Writer, code, msg string) error {
+// finishMethod is like finish but honours Console.suppressReady so extended
+// query paths can skip the trailing ReadyForQuery.
+func (c *Console) finishMethod(w *wire.Writer, tag string) error {
+	if tag != "" {
+		if err := writeCommandComplete(w, tag); err != nil {
+			return err
+		}
+	}
+	if !c.suppressReady {
+		if err := writeReadyForQuery(w); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
+}
+
+func (c *Console) writeErr(w *wire.Writer, code, msg string) error {
 	if err := w.WriteMessage(wire.BeErrorResponse, wire.BuildError("ERROR", code, msg)); err != nil {
 		return err
 	}
-	return finish(w, "")
+	return c.finishMethod(w, "")
 }
 
 func itoa(n int) string    { return fmt.Sprintf("%d", n) }

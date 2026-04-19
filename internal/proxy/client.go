@@ -322,6 +322,11 @@ type session struct {
 	statsKey string
 	inTx    bool
 	pinned  bool
+
+	// extAdmin holds an admin SHOW query the client Parse'd via extended
+	// protocol. When set, handleBind/handleDescribeOrClose/handleExecute
+	// synthesize local responses instead of forwarding.
+	extAdmin string
 }
 
 // releaseBackend returns the current backend to its pool (or closes it if
@@ -415,6 +420,15 @@ func (s *session) dispatch(m wire.Message) error {
 	case wire.FeClose:
 		return s.handleDescribeOrClose(m, false)
 	case wire.FeSync:
+		if s.extAdmin != "" {
+			// Emit ReadyForQuery ourselves; admin query already emitted
+			// RowDescription/DataRow/CommandComplete during Execute.
+			if err := s.cw.WriteMessage(wire.BeReadyForQuery, wire.BuildReadyForQuery(wire.TxIdle)); err != nil {
+				return err
+			}
+			s.extAdmin = ""
+			return s.cw.Flush()
+		}
 		// Sync flushes pending extended-query responses and ends the
 		// implicit transaction. We forward it AND pump responses back to
 		// the client until ReadyForQuery.
@@ -422,7 +436,19 @@ func (s *session) dispatch(m wire.Message) error {
 			return err
 		}
 		return s.relayUntilReady()
-	case wire.FeExecute, wire.FeFlush, wire.FeCopyData, wire.FeCopyDone, wire.FeCopyFail:
+	case wire.FeExecute:
+		if s.extAdmin != "" {
+			console := admin.New(s.p)
+			if err := console.HandleExtendedExecute(s.cw, s.extAdmin); err != nil {
+				return err
+			}
+			return nil
+		}
+		if err := s.forwardToBackend(m); err != nil {
+			return err
+		}
+		return nil
+	case wire.FeFlush, wire.FeCopyData, wire.FeCopyDone, wire.FeCopyFail:
 		if err := s.forwardToBackend(m); err != nil {
 			return err
 		}
@@ -487,14 +513,19 @@ func (s *session) handleSimpleQuery(m wire.Message) error {
 
 func (s *session) handleParse(m wire.Message) error {
 	s.p.metrics.ParseMessages.Add(1)
-	// Look at the SQL text to decide pin/route. In transaction mode, we
-	// rewrite the statement name for later transparent re-parse on swap.
-	_, _, _, err := wire.ParseParseMessage(m.Body)
+	stmtName, query, oids, err := wire.ParseParseMessage(m.Body)
 	if err != nil {
 		return writeErrorToClient(s.cw, "08P01", "invalid Parse message")
 	}
-	// Analyze against the query text — re-extract quickly.
-	_, query, _, _ := wire.ParseParseMessage(m.Body)
+	_ = stmtName
+	_ = oids
+	// Intercept admin SHOW queries even when issued via extended protocol —
+	// we need to remember the statement so the ensuing Bind/Describe/Execute
+	// return our local answer instead of being forwarded to Postgres.
+	if isReadOnlyAdminQuery(query) {
+		s.extAdmin = query
+		return s.cw.WriteMessage(wire.BeParseComplete, nil)
+	}
 	a := classify.Analyze(query)
 	if err := s.ensureBackend(a.Route); err != nil {
 		return writeErrorToClient(s.cw, "08006", err.Error())
@@ -532,6 +563,9 @@ func (s *session) handleParse(m wire.Message) error {
 
 func (s *session) handleBind(m wire.Message) error {
 	s.p.metrics.BindMessages.Add(1)
+	if s.extAdmin != "" {
+		return s.cw.WriteMessage(wire.BeBindComplete, nil)
+	}
 	rewritten, _, err := s.registry.OnBind(m.Body)
 	if err != nil {
 		return writeErrorToClient(s.cw, "08P01", err.Error())
@@ -549,6 +583,16 @@ func (s *session) handleBind(m wire.Message) error {
 }
 
 func (s *session) handleDescribeOrClose(m wire.Message, describe bool) error {
+	if s.extAdmin != "" {
+		// Synthesize a RowDescription matching what the admin handler would
+		// send — but we don't know the columns until HandleQuery runs.
+		// Easiest: defer the describe; psql doesn't require it if Execute
+		// is coming. If a Describe arrives, emit a NoData placeholder.
+		if describe {
+			return s.cw.WriteMessage(wire.BeNoData, nil)
+		}
+		return s.cw.WriteMessage(wire.BeCloseComplete, nil)
+	}
 	rewritten, _, err := s.registry.OnDescribeOrClose(m.Body)
 	if err != nil {
 		return writeErrorToClient(s.cw, "08P01", err.Error())
