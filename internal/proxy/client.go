@@ -324,7 +324,6 @@ type session struct {
 	dbName  string
 	db      *config.Database
 	backend *pool.Backend
-	backendSet *prepared.BackendSet
 	registry *prepared.ClientRegistry
 	statsKey string
 	inTx    bool
@@ -349,7 +348,6 @@ func (s *session) releaseBackend() {
 	if s.backend == nil {
 		return
 	}
-	s.backendSet = nil
 	pl, err := s.p.poolFor(pool.Key{Server: s.backend.Server.Name, Database: s.dbName, User: s.user, Params: s.startupSig}, s.db, s.startupParams)
 	if err != nil {
 		_ = s.backend.Close()
@@ -389,7 +387,6 @@ func (s *session) ensureBackend(r classify.Route) error {
 		return err
 	}
 	s.backend = b
-	s.backendSet = prepared.NewBackendSet()
 	if err := s.syncBackendParams(); err != nil {
 		// Failed to re-sync — the backend is in a weird state. Close it so
 		// it gets replaced, and surface the error to the client.
@@ -643,11 +640,11 @@ func (s *session) handleParse(m wire.Message) error {
 	// If the backend hasn't parsed this canonical statement yet, inject a
 	// Parse → Sync preamble. Only needed in transaction mode where a backend
 	// swap may have lost prior parses; session mode also works but is harmless.
-	if ent != nil && s.backendSet != nil && !s.backendSet.Has(ent.CanonicalName) {
+	if ent != nil && s.backend.PreparedSet != nil && !s.backend.PreparedSet.Has(ent.CanonicalName) {
 		if err := s.backend.Writer.WriteMessage(wire.FeParse, rewritten); err != nil {
 			return err
 		}
-		s.backendSet.Add(ent.CanonicalName)
+		s.backend.PreparedSet.Add(ent.CanonicalName)
 		return s.backend.Writer.Flush()
 	}
 	// Statement already known to backend; the client still expects a
@@ -667,15 +664,20 @@ func (s *session) handleBind(m wire.Message) error {
 	if s.extAdmin != "" {
 		return s.cw.WriteMessage(wire.BeBindComplete, nil)
 	}
-	rewritten, _, err := s.registry.OnBind(m.Body)
+	rewritten, ent, err := s.registry.OnBind(m.Body)
 	if err != nil {
 		return writeErrorToClient(s.cw, "08P01", err.Error())
 	}
 	if s.backend == nil {
-		// Extended query without Parse? Pick primary by default.
 		if err := s.ensureBackend(classify.RoutePrimary); err != nil {
 			return writeErrorToClient(s.cw, "08006", err.Error())
 		}
+	}
+	// If this bind targets a named prepared statement AND the current
+	// backend hasn't parsed the canonical name (likely because the pool
+	// swapped backends after a previous Sync), inject Parse first.
+	if err := s.ensureCanonicalParsed(ent); err != nil {
+		return writeErrorToClient(s.cw, "08006", err.Error())
 	}
 	if err := s.backend.Writer.WriteMessage(wire.FeBind, rewritten); err != nil {
 		return err
@@ -683,16 +685,41 @@ func (s *session) handleBind(m wire.Message) error {
 	return s.backend.Writer.Flush()
 }
 
+// ensureCanonicalParsed makes sure the current backend has already parsed
+// the given prepared-statement Entry. If not (common in transaction-mode
+// pooling after a backend swap), it injects a Parse ahead of whatever the
+// caller is about to send. Safe to call with ent==nil (no-op).
+func (s *session) ensureCanonicalParsed(ent *prepared.Entry) error {
+	if ent == nil || s.backend == nil {
+		return nil
+	}
+	if s.backend.PreparedSet != nil && s.backend.PreparedSet.Has(ent.CanonicalName) {
+		return nil
+	}
+	body := wire.BuildParseMessage(ent.CanonicalName, ent.Query, ent.ParamOIDs)
+	if err := s.backend.Writer.WriteMessage(wire.FeParse, body); err != nil {
+		return err
+	}
+	if s.backend.PreparedSet != nil {
+		s.backend.PreparedSet.Add(ent.CanonicalName)
+	}
+	return nil
+}
+
 func (s *session) handleDescribeOrClose(m wire.Message, describe bool) error {
 	if s.extAdmin != "" {
-		// Synthesize a RowDescription matching what the admin handler would
-		// send — but we don't know the columns until HandleQuery runs.
-		// Easiest: defer the describe; psql doesn't require it if Execute
-		// is coming. If a Describe arrives, emit a NoData placeholder.
 		if describe {
 			return s.cw.WriteMessage(wire.BeNoData, nil)
 		}
 		return s.cw.WriteMessage(wire.BeCloseComplete, nil)
+	}
+	// Look up the statement (if named) so we can re-Parse it on the current
+	// backend if the pool swapped it out from under us.
+	var ent *prepared.Entry
+	if len(m.Body) >= 1 && m.Body[0] == 'S' {
+		if name, _, err := readCStringFromBody(m.Body[1:]); err == nil && name != "" {
+			ent = s.registry.Lookup(name)
+		}
 	}
 	rewritten, _, err := s.registry.OnDescribeOrClose(m.Body)
 	if err != nil {
@@ -703,6 +730,9 @@ func (s *session) handleDescribeOrClose(m wire.Message, describe bool) error {
 			return writeErrorToClient(s.cw, "08006", err.Error())
 		}
 	}
+	if err := s.ensureCanonicalParsed(ent); err != nil {
+		return writeErrorToClient(s.cw, "08006", err.Error())
+	}
 	tag := wire.FeClose
 	if describe {
 		tag = wire.FeDescribe
@@ -711,6 +741,16 @@ func (s *session) handleDescribeOrClose(m wire.Message, describe bool) error {
 		return err
 	}
 	return s.backend.Writer.Flush()
+}
+
+// readCStringFromBody reads a NUL-terminated C-string from body.
+func readCStringFromBody(b []byte) (string, []byte, error) {
+	for i, c := range b {
+		if c == 0 {
+			return string(b[:i]), b[i+1:], nil
+		}
+	}
+	return "", nil, wire.ErrShortRead
 }
 
 // forwardToBackend sends the client message to the current backend untouched.

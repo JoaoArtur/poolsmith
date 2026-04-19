@@ -120,6 +120,16 @@ func (r *ClientRegistry) OnDescribeOrClose(body []byte) (rewritten []byte, remov
 	return buildNamedDC(kind, ent.CanonicalName), false, nil
 }
 
+// Lookup returns the Entry for a client statement name, or nil.
+func (r *ClientRegistry) Lookup(clientName string) *Entry {
+	if clientName == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.byName[clientName]
+}
+
 // ForgetClient frees the registry (called on client disconnect).
 func (r *ClientRegistry) ForgetClient() {
 	r.mu.Lock()

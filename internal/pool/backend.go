@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/JoaoArtur/poolsmith/internal/config"
+	"github.com/JoaoArtur/poolsmith/internal/prepared"
 	"github.com/JoaoArtur/poolsmith/internal/wire"
 )
 
@@ -75,6 +76,11 @@ type Backend struct {
 	// Unique ID for logs / admin console.
 	ID uint64
 
+	// PreparedSet tracks the canonical prepared-statement names this
+	// backend has Parse'd. Shared across any session that borrows the
+	// backend — it reflects real server-side state, not per-session state.
+	PreparedSet *prepared.BackendSet
+
 	// Mutable state — guarded by Pool.mu when the Pool owns this backend, or
 	// owned exclusively by the session when checked out.
 	state        atomic.Int32 // BackendState as int32
@@ -103,8 +109,9 @@ func NewBackend(ctx context.Context, srv *config.Server, dbName, user string, ti
 		Conn:      conn,
 		Reader:    wire.NewReader(conn),
 		Writer:    wire.NewWriter(conn),
-		Params:    map[string]string{},
-		createdAt: time.Now(),
+		Params:      map[string]string{},
+		PreparedSet: prepared.NewBackendSet(),
+		createdAt:   time.Now(),
 	}
 	b.lastUsedAt.Store(time.Now().UnixNano())
 	return b, nil
