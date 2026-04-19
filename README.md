@@ -148,6 +148,127 @@ Classifier benchmarks on an Apple M4 (`go test -bench=.` in
 Wire framing (`internal/wire`) and auth (`internal/auth`) tests pass under
 `-race`. SCRAM-SHA-256 is verified against the RFC 7677 test vector.
 
+## Tuning for large connection counts
+
+Poolsmith is designed to keep server-side connections small while accepting
+a large number of client connections. The two knobs you care about are
+**client-side fan-in** (how many apps/goroutines call Poolsmith) and
+**server-side fan-out** (how many TCP connections Poolsmith holds against
+Postgres).
+
+### Reference configurations
+
+```ini
+;; ──────────────────────────────── 1 000 clients ────────────────────────────
+[poolsmith]
+listen_port       = 6432
+pool_mode         = transaction
+default_pool_size = 25          ; per (db, user) pool — 3 pods × 25 ≈ 75 backends
+max_client_conn   = 1000
+server_idle_timeout    = 600    ; keep idle backends up to 10 min so bursts reuse them
+server_lifetime        = 3600
+client_login_timeout   = 60
+query_wait_timeout     = 120
+```
+
+Deploy with **3 replicas** of the container (≈ 333 clients per pod) and
+`default_pool_size = 25` per pool. Worst case ~75 real Postgres backends
+— 7.5 % of what 1 000 direct app connections would cost.
+
+```ini
+;; ──────────────────────────────── 5 000 clients ────────────────────────────
+[poolsmith]
+listen_port       = 6432
+pool_mode         = transaction
+default_pool_size = 40          ; 10 pods × 40 = 400 backends max
+max_client_conn   = 5000
+server_idle_timeout    = 900
+server_lifetime        = 3600
+query_wait_timeout     = 60     ; fail-fast rather than unbounded queueing
+```
+
+Deploy with **10 replicas** and an HPA scaling up to 20. At 5 000 clients
+you want Postgres tuned too: `max_connections ≥ 500`,
+`shared_buffers ≥ 8 GB`, and `effective_cache_size` matching host RAM.
+
+### Per-pod OS / runtime tuning
+
+| Setting                     | Recommendation                                  |
+|-----------------------------|-------------------------------------------------|
+| `ulimit -n`                 | ≥ 2 × `max_client_conn` + `default_pool_size`.  |
+| `GOMAXPROCS`                | Equal to the container CPU limit.               |
+| `GOMEMLIMIT`                | ~90 % of the container memory limit.            |
+| `net.core.somaxconn`        | ≥ 1024 on the host — the k8s node sysctl does it. |
+| `net.ipv4.tcp_tw_reuse`     | `1` (safe for client-only sockets).             |
+
+The `deploy/k8s/deployment.yaml` in this repo already wires `GOMAXPROCS`
+and `GOMEMLIMIT` from the pod limits so you don't have to.
+
+### Horizontal vs. vertical scale
+
+Each Poolsmith pod is a single Go process with its own pool map. Two pods
+at `default_pool_size = 25` open **up to 50 backends** against Postgres,
+not 25. That's by design — it mirrors how PgBouncer scales. When in doubt,
+**horizontal > vertical**: more replicas give you CPU headroom for TLS,
+SCRAM, and the classifier's hot path without growing the per-pod pool.
+
+### Quick health check on pressure
+
+Inside your fleet, connect to any DB through Poolsmith and run:
+
+```sql
+SHOW POOLS;     -- cl_waiting > 0 means your pool is too small
+SHOW STATS;     -- per-db query counts + byte counts
+SHOW CLIENTS;   -- total live client sessions per pod
+```
+
+`cl_waiting` consistently above zero means clients are blocked acquiring a
+backend. Raise `pool_size` before raising `max_client_conn`.
+
+## Docker image
+
+A minimal multi-stage Dockerfile is included — builder runs the Go toolchain,
+final stage is `scratch` with just the stripped binary. The resulting image
+is **~4 MB**.
+
+```bash
+docker build -t poolsmith:dev --build-arg VERSION=0.1.0 .
+docker run --rm -p 6432:6432 \
+  -v "$PWD/config/poolsmith.ini.example:/etc/poolsmith/poolsmith.ini:ro" \
+  -v "$PWD/config/userlist.txt.example:/etc/poolsmith/userlist.txt:ro" \
+  poolsmith:dev
+```
+
+Push to your registry:
+
+```bash
+docker tag poolsmith:dev ghcr.io/joaoartur/poolsmith:0.1.0
+docker push ghcr.io/joaoartur/poolsmith:0.1.0
+```
+
+## Kubernetes
+
+Production-shaped manifests live in `deploy/k8s/`:
+
+```bash
+cd deploy/k8s
+# edit configmap.yaml (pool sizes, upstream hosts) and secret.yaml (passwords)
+kubectl apply -k .
+```
+
+Highlights:
+
+- Runs as non-root (UID 65532), read-only rootfs, all capabilities dropped.
+- Service exposes port **5432** so apps connect to `poolsmith.poolsmith.svc`
+  as if it were Postgres — no app-side changes required.
+- HPA scales 3 → 20 replicas on CPU 70% / memory 80%.
+- PodDisruptionBudget keeps at least 2 replicas available.
+- `topologySpreadConstraints` spread replicas across nodes.
+- `terminationGracePeriodSeconds: 60` gives poolsmith time to drain
+  in-flight queries on rolling updates.
+
+See `deploy/k8s/README.md` for the full rundown.
+
 ## Caveats
 
 - Functions that internally issue writes (`SELECT my_fn()` where `my_fn`

@@ -5,3 +5,5 @@
 /dist/
 .maestri
 .claude
+node_modules/
+.env

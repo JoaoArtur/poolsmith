@@ -11,6 +11,9 @@
 
 import pg from 'pg';
 import process from 'node:process';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const DSN         = process.env.DSN         || 'postgres://postgres@localhost:6432/postgres';
 const CONCURRENCY = parseInt(process.env.CONCURRENCY || '300', 10);
