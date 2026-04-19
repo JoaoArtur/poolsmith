@@ -1,6 +1,6 @@
 // Package admin implements Poolsmith's admin console — a pseudo database
-// named "pgbouncer" (and its alias "poolsmith") that accepts SQL commands
-// like SHOW POOLS, SHOW STATS, PAUSE, RESUME, RELOAD, SHUTDOWN.
+// named "poolsmith" that accepts SQL commands like SHOW POOLS, SHOW STATS,
+// PAUSE, RESUME, RELOAD, SHUTDOWN.
 //
 // Clients connect with psql, select the admin database, and run commands as
 // plain text via the simple-query protocol. Responses are synthesized
@@ -46,11 +46,7 @@ func New(reg Registry) *Console { return &Console{reg: reg} }
 
 // IsAdminDB reports whether dbName targets the admin console.
 func IsAdminDB(dbName string) bool {
-	switch strings.ToLower(dbName) {
-	case "pgbouncer", "poolsmith":
-		return true
-	}
-	return false
+	return strings.ToLower(dbName) == "poolsmith"
 }
 
 // HandleExtendedExecute runs an admin query during an extended-protocol
