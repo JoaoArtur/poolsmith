@@ -248,26 +248,16 @@ docker push ghcr.io/joaoartur/poolsmith:0.1.0
 
 ## Kubernetes
 
-Production-shaped manifests live in `deploy/k8s/`:
+A single-file manifest is in `deploy/k8s/poolsmith.yaml` — ConfigMap + Secret
++ Deployment (2 replicas) + Service. Edit the INI inline, set real passwords
+in the Secret, then:
 
 ```bash
-cd deploy/k8s
-# edit configmap.yaml (pool sizes, upstream hosts) and secret.yaml (passwords)
-kubectl apply -k .
+kubectl apply -f deploy/k8s/poolsmith.yaml
 ```
 
-Highlights:
-
-- Runs as non-root (UID 65532), read-only rootfs, all capabilities dropped.
-- Service exposes port **5432** so apps connect to `poolsmith.poolsmith.svc`
-  as if it were Postgres — no app-side changes required.
-- HPA scales 3 → 20 replicas on CPU 70% / memory 80%.
-- PodDisruptionBudget keeps at least 2 replicas available.
-- `topologySpreadConstraints` spread replicas across nodes.
-- `terminationGracePeriodSeconds: 60` gives poolsmith time to drain
-  in-flight queries on rolling updates.
-
-See `deploy/k8s/README.md` for the full rundown.
+The Service publishes on port **5432** so apps connect as if it were
+Postgres. Scale with `kubectl scale deploy/poolsmith --replicas=N`.
 
 ## Caveats
 

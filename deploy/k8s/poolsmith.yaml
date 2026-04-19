@@ -1,0 +1,76 @@
+# Minimal Poolsmith deployment.
+# kubectl apply -f poolsmith.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: poolsmith-config
+data:
+  poolsmith.ini: |
+    [poolsmith]
+    listen_addr       = 0.0.0.0
+    listen_port       = 6432
+    auth_type         = md5
+    auth_file         = /etc/poolsmith/userlist.txt
+    pool_mode         = transaction
+    default_pool_size = 20
+    max_client_conn   = 1000
+    admin_users       = postgres
+
+    [servers]
+    primary = host=postgres port=5432 role=primary
+
+    [databases]
+    app = server=primary dbname=app
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: poolsmith-userlist
+type: Opaque
+stringData:
+  userlist.txt: |
+    "app" "CHANGE_ME"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: poolsmith
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: poolsmith
+  template:
+    metadata:
+      labels:
+        app: poolsmith
+    spec:
+      containers:
+        - name: poolsmith
+          image: ghcr.io/joaoartur/poolsmith:latest
+          args: ["-config", "/etc/poolsmith/poolsmith.ini"]
+          ports:
+            - containerPort: 6432
+          resources:
+            requests: { cpu: "100m", memory: "64Mi" }
+            limits:   { cpu: "1",    memory: "256Mi" }
+          readinessProbe:
+            tcpSocket: { port: 6432 }
+          volumeMounts:
+            - { name: config,   mountPath: /etc/poolsmith/poolsmith.ini, subPath: poolsmith.ini }
+            - { name: userlist, mountPath: /etc/poolsmith/userlist.txt,  subPath: userlist.txt  }
+      volumes:
+        - { name: config,   configMap: { name: poolsmith-config } }
+        - { name: userlist, secret:    { secretName: poolsmith-userlist } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: poolsmith
+spec:
+  selector:
+    app: poolsmith
+  ports:
+    - port: 5432
+      targetPort: 6432
