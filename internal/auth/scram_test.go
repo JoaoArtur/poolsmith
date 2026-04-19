@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"testing"
 
-	"github.com/poolsmith/poolsmith/internal/wire"
+	"github.com/JoaoArtur/poolsmith/internal/wire"
 )
 
 // RFC 7677 Section 3 test vector.

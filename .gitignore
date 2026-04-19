@@ -1,0 +1,5 @@
+/poolsmith
+/bin/
+*.test
+*.out
+/dist/

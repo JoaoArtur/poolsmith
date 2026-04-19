@@ -3,8 +3,8 @@ package auth
 import (
 	"fmt"
 
-	"github.com/poolsmith/poolsmith/internal/config"
-	"github.com/poolsmith/poolsmith/internal/wire"
+	"github.com/JoaoArtur/poolsmith/internal/config"
+	"github.com/JoaoArtur/poolsmith/internal/wire"
 )
 
 // Authenticator dispatches client-side authentication based on the configured

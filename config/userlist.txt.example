@@ -1,0 +1,11 @@
+;; PgBouncer-compatible userlist.txt.
+;;
+;; Format: one entry per line, "username" "password".
+;; Passwords may be plain text (for md5 auth with SCRAM later) OR a verifier:
+;;   SCRAM-SHA-256$<iter>:<salt-b64>$<storedKey-b64>:<serverKey-b64>
+;;
+;; Keep this file readable only by the poolsmith process user.
+
+"postgres" "change-me-before-going-live"
+"app"      "app-password"
+"reports"  "reports-password"

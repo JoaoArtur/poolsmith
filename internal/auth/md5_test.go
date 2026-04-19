@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/poolsmith/poolsmith/internal/wire"
+	"github.com/JoaoArtur/poolsmith/internal/wire"
 )
 
 func pipePair(t *testing.T) (net.Conn, net.Conn) {

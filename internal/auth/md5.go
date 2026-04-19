@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/poolsmith/poolsmith/internal/wire"
+	"github.com/JoaoArtur/poolsmith/internal/wire"
 )
 
 // md5Hex returns hex(md5(a || b)).

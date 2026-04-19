@@ -3,7 +3,7 @@ package auth
 import (
 	"crypto/subtle"
 
-	"github.com/poolsmith/poolsmith/internal/wire"
+	"github.com/JoaoArtur/poolsmith/internal/wire"
 )
 
 // SQLSTATE 28P01: invalid_password.

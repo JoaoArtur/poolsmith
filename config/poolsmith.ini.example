@@ -1,0 +1,55 @@
+;; Poolsmith example configuration — PgBouncer-compatible INI dialect.
+;;
+;; Save as /etc/poolsmith/poolsmith.ini and point the binary at it with
+;;   poolsmith -config /etc/poolsmith/poolsmith.ini
+
+[poolsmith]
+listen_addr = 0.0.0.0
+listen_port = 6432
+
+;; Auth against clients. "md5" or "scram-sha-256" are recommended.
+auth_type = md5
+auth_file = /etc/poolsmith/userlist.txt
+
+;; Pool defaults. Individual databases can override.
+pool_mode          = transaction
+default_pool_size  = 20
+reserve_pool_size  = 5
+min_pool_size      = 0
+max_client_conn    = 500
+
+server_idle_timeout    = 600
+server_lifetime        = 3600
+server_connect_timeout = 15
+query_wait_timeout     = 120
+client_login_timeout   = 60
+
+admin_users = postgres
+
+;; Client-facing TLS (optional).
+; client_tls_sslmode   = require
+; client_tls_cert_file = /etc/poolsmith/server.crt
+; client_tls_key_file  = /etc/poolsmith/server.key
+; client_tls_ca_file   = /etc/poolsmith/ca.crt
+
+;; Upstream TLS default (per-server can override via `sslmode=…`).
+server_tls_sslmode = prefer
+
+;; ---------------------------------------------------------------------------
+;; Upstream Postgres servers (logical names + host:port + role).
+;; ---------------------------------------------------------------------------
+[servers]
+primary = host=10.0.0.1 port=5432 role=primary
+replica1 = host=10.0.0.2 port=5432 role=replica
+replica2 = host=10.0.0.3 port=5432 role=replica
+
+;; ---------------------------------------------------------------------------
+;; Client-visible databases. Each one maps to a primary + optional replicas.
+;; Writes and DDL go to `server=`; SELECTs go to one of `replicas=` (if any).
+;; ---------------------------------------------------------------------------
+[databases]
+app       = server=primary replicas=replica1,replica2 dbname=app_prod pool_size=20 pool_mode=transaction
+reporting = server=replica1 dbname=app_prod pool_mode=session
+
+;; Legacy PgBouncer style also works:
+; legacy  = host=10.0.0.1 port=5432 dbname=legacy_db pool_size=10

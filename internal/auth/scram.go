@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/poolsmith/poolsmith/internal/wire"
+	"github.com/JoaoArtur/poolsmith/internal/wire"
 )
 
 const (
