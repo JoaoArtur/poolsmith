@@ -9,3 +9,5 @@ node_modules/
 .env
 
 scripts/deploy.sh
+
+poolsmith.dev.yaml

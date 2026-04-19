@@ -69,8 +69,13 @@ kind: Service
 metadata:
   name: poolsmith
 spec:
+  type: ClusterIP
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [IPv4]
   selector:
     app: poolsmith
   ports:
-    - port: 5432
+    - name: pg
+      port: 5432
       targetPort: 6432
+      protocol: TCP
