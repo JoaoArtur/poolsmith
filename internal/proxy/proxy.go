@@ -231,6 +231,7 @@ func (p *Proxy) poolFor(k pool.Key, db *config.Database) (*pool.Pool, error) {
 // connectBackend returns a ConnectFunc bound to the given server+database.
 func (p *Proxy) connectBackend(srv *config.Server, db *config.Database) pool.ConnectFunc {
 	return func(ctx context.Context, k pool.Key) (*pool.Backend, error) {
+		p.log.Debug("proxy: dialing upstream", "server", srv.Name, "host", srv.Host, "port", srv.Port, "db", db.UpstreamName, "user", k.User)
 		b, err := pool.NewBackend(ctx, srv, db.UpstreamName, k.User, p.cfg.ServerConnectTimeout)
 		if err != nil {
 			return nil, err

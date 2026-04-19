@@ -119,7 +119,7 @@ func (p *Proxy) handleClient(rawConn net.Conn) {
 	//    The specific params we forward come from the first backend we pair
 	//    with, but since we may not attach yet, synthesize the essentials now
 	//    and patch later via ParameterStatus messages.
-	if err := finishClientStartup(cw, user, dbName); err != nil {
+	if err := finishClientStartup(cw, user, dbName, p.cfg.AuthType != config.AuthSCRAM); err != nil {
 		p.log.Warn("client: finish startup", "err", err)
 		return
 	}
@@ -227,7 +227,13 @@ func (p *Proxy) isAdminUser(user string) bool {
 
 // runAdmin is a simple-query-only loop for the admin console.
 func (p *Proxy) runAdmin(cr *wire.Reader, cw *wire.Writer) error {
-	// Send BackendKeyData (mostly theatre — admin can't be cancelled) then RFQ.
+	// SCRAM's server side already sends AuthenticationOk; MD5/trust/plain
+	// don't — we do it here for those.
+	if p.cfg.AuthType != config.AuthSCRAM {
+		if err := cw.WriteMessage(wire.BeAuthentication, wire.BuildAuthOK()); err != nil {
+			return err
+		}
+	}
 	if err := cw.WriteMessage(wire.BeParameterStatus, wire.BuildParameterStatus("server_version", "Poolsmith 0.1")); err != nil {
 		return err
 	}
@@ -266,11 +272,13 @@ func (p *Proxy) runAdmin(cr *wire.Reader, cw *wire.Writer) error {
 	}
 }
 
-// finishClientStartup sends AuthOK + essential ParameterStatus + synthetic
-// BackendKeyData + ReadyForQuery(Idle).
-func finishClientStartup(cw *wire.Writer, user, dbName string) error {
-	if err := cw.WriteMessage(wire.BeAuthentication, wire.BuildAuthOK()); err != nil {
-		return err
+// finishClientStartup sends AuthOK (if sendAuthOk is true) + essential
+// ParameterStatus + synthetic BackendKeyData + ReadyForQuery(Idle).
+func finishClientStartup(cw *wire.Writer, user, dbName string, sendAuthOk bool) error {
+	if sendAuthOk {
+		if err := cw.WriteMessage(wire.BeAuthentication, wire.BuildAuthOK()); err != nil {
+			return err
+		}
 	}
 	for k, v := range map[string]string{
 		"server_version":          "Poolsmith",
