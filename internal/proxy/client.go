@@ -36,7 +36,9 @@ func (p *Proxy) handleClient(rawConn net.Conn) {
 	// 1. TLS / SSLRequest negotiation.
 	conn, err := p.maybeUpgradeClientTLS(rawConn)
 	if err != nil {
-		p.log.Warn("client: TLS upgrade failed", "err", err, "remote", rawConn.RemoteAddr())
+		// TCP/TLS probes (kube-proxy, GLB health checks) open and close
+		// without completing TLS — demote to debug to avoid log spam.
+		p.log.Debug("client: TLS upgrade failed", "err", err, "remote", rawConn.RemoteAddr())
 		return
 	}
 
@@ -46,7 +48,8 @@ func (p *Proxy) handleClient(rawConn net.Conn) {
 	// 2. Startup message (may be Cancel, GSSENC, etc.).
 	m, err := cr.ReadStartupMessage()
 	if err != nil {
-		p.log.Warn("client: read startup", "err", err)
+		// Same reason as above — most of these are half-open probes.
+		p.log.Debug("client: read startup", "err", err)
 		return
 	}
 	sp, err := wire.ParseStartup(m.Body)
@@ -387,7 +390,94 @@ func (s *session) ensureBackend(r classify.Route) error {
 	}
 	s.backend = b
 	s.backendSet = prepared.NewBackendSet()
+	if err := s.syncBackendParams(); err != nil {
+		// Failed to re-sync — the backend is in a weird state. Close it so
+		// it gets replaced, and surface the error to the client.
+		b.Close()
+		s.backend = nil
+		return err
+	}
 	return nil
+}
+
+// syncBackendParams makes the newly-acquired backend match the session's
+// desired tracked parameter values. It issues one SET per mismatching
+// parameter and drains responses up to ReadyForQuery. This is how one
+// shared pool serves many tenants with distinct search_paths.
+func (s *session) syncBackendParams() error {
+	if s.backend == nil || len(s.startupParams) == 0 {
+		return nil
+	}
+	for _, name := range trackedParamNames {
+		want := lookupCI(s.startupParams, name)
+		if want == "" {
+			continue
+		}
+		have := lookupCI(s.backend.Params, name)
+		if have == want {
+			continue
+		}
+		if err := s.setBackendParam(name, want); err != nil {
+			return fmt.Errorf("sync %s=%q: %w", name, want, err)
+		}
+	}
+	return nil
+}
+
+// setBackendParam runs `SET <name> TO <literal>` on the backend and drains
+// the response until ReadyForQuery. Values are quoted as single-quoted
+// string literals with '' escaping — safe for every GUC value Postgres
+// accepts.
+func (s *session) setBackendParam(name, value string) error {
+	quoted := "'" + strings.ReplaceAll(value, "'", "''") + "'"
+	sql := "SET " + name + " TO " + quoted
+	if err := s.backend.Writer.WriteMessage(wire.FeQuery, wire.BuildQuery(sql)); err != nil {
+		return err
+	}
+	if err := s.backend.Writer.Flush(); err != nil {
+		return err
+	}
+	for {
+		m, err := s.backend.Reader.ReadMessage()
+		if err != nil {
+			return err
+		}
+		switch m.Type {
+		case wire.BeReadyForQuery:
+			s.backend.Params[name] = value
+			return nil
+		case wire.BeErrorResponse:
+			// Drain until RFQ anyway so the backend stays in a usable state.
+			errMsg := wire.FormatError(wire.ParseErrorFields(m.Body))
+			for {
+				m2, err := s.backend.Reader.ReadMessage()
+				if err != nil {
+					return err
+				}
+				if m2.Type == wire.BeReadyForQuery {
+					break
+				}
+			}
+			return errors.New(errMsg)
+		case wire.BeParameterStatus:
+			n, v, _ := wire.ParseParameterStatus(m.Body)
+			s.backend.Params[n] = v
+		}
+	}
+}
+
+// lookupCI returns m[k] for any case-insensitive match of k in m.
+func lookupCI(m map[string]string, k string) string {
+	if v, ok := m[k]; ok {
+		return v
+	}
+	kl := strings.ToLower(k)
+	for mk, mv := range m {
+		if strings.ToLower(mk) == kl {
+			return mv
+		}
+	}
+	return ""
 }
 
 func (s *session) pickServer(r classify.Route) string {
@@ -800,23 +890,31 @@ func filterStartupParams(in map[string]string) map[string]string {
 	return out
 }
 
-// stickyParamNames are the startup parameters whose value, if different
-// between two clients, MUST force them onto separate pools — getting them
-// wrong on a reused backend would corrupt bytes or silently return rows
-// from the wrong schema.
+// stickyParamNames are startup parameters whose value MUST force a separate
+// pool — there's currently no such parameter because everything we care
+// about (search_path, client_encoding, bytea_output, …) can be re-SET on
+// the backend cheaply at checkout via trackedParamNames.
 //
-// Deliberately small: clients frequently send volatile `options=`, per-pod
-// `application_name`, or fleet-specific `TimeZone` values that have no
-// effect on query correctness. Forcing a separate pool for each would
-// fragment the server-side connection count back to one-per-client.
-//
-// Anything NOT listed here is still forwarded verbatim on the upstream
-// StartupMessage; it just doesn't partition the pool map.
-var stickyParamNames = map[string]struct{}{
-	"search_path":                 {},
-	"client_encoding":             {},
-	"bytea_output":                {},
-	"standard_conforming_strings": {},
+// Intentionally empty: in multi-tenant apps each client often sends a
+// unique search_path, and partitioning the pool by that would collapse
+// multiplexing back to one backend per tenant.
+var stickyParamNames = map[string]struct{}{}
+
+// trackedParamNames are startup parameters whose value is (a) important
+// for query correctness and (b) settable via SET at runtime. When a
+// session checks out a backend whose current value differs from the
+// session's desired value, Poolsmith issues a SET before handing the
+// backend over. This is how many tenants share one small pool without
+// getting each other's search_path.
+var trackedParamNames = []string{
+	"search_path",
+	"client_encoding",
+	"bytea_output",
+	"standard_conforming_strings",
+	"timezone",
+	"datestyle",
+	"intervalstyle",
+	"extra_float_digits",
 }
 
 // startupParamsSig returns a stable 16-hex-digit signature for the subset of
