@@ -148,6 +148,52 @@ Classifier benchmarks on an Apple M4 (`go test -bench=.` in
 Wire framing (`internal/wire`) and auth (`internal/auth`) tests pass under
 `-race`. SCRAM-SHA-256 is verified against the RFC 7677 test vector.
 
+### End-to-end stress test
+
+`scripts/stress-test.js` spawns N dedicated TCP client connections and
+hammers them with `SELECT 1` until the duration elapses. Run from a
+developer laptop (Apple M4, Docker Desktop Postgres 16, Poolsmith with
+`pool_mode=transaction`, `default_pool_size=30`):
+
+```bash
+cd scripts
+DSN="postgres://drivio:drivio123@localhost:6432/drivio" \
+  CONCURRENCY=300 DURATION_SEC=20 \
+  node stress-test.js
+```
+
+Results for **300 concurrent clients × 20 s**:
+
+| Metric                | Value                               |
+|-----------------------|-------------------------------------|
+| Throughput            | **31 647 q/s** (791 204 queries)    |
+| Latency p50           | 7.51 ms                             |
+| Latency p95           | 10.58 ms                            |
+| Latency p99           | 13.69 ms                            |
+| Max latency           | 352.81 ms                           |
+| Per-client fairness   | min 2 471 / avg 2 637 / max 2 841   |
+| Connection errors     | 0                                   |
+| Query errors          | 0                                   |
+
+Mid-stress, `SHOW POOLS` and `SHOW CLIENTS` (queried concurrently via
+`psql`) confirmed the multiplexing working as designed:
+
+```
+ database |  user  | server  | cl_active | cl_waiting | sv_active | sv_idle | sv_total |  pool_mode
+----------+--------+---------+-----------+------------+-----------+---------+----------+-------------
+ drivio   | drivio | primary |    30     |    264     |    30     |   0     |    30    | transaction
+
+ active_clients
+----------------
+     302
+```
+
+**300 client connections → 30 real Postgres backends (10×
+multiplexing)**, with 264 clients queued on `cl_waiting` taking turns on
+the shared pool. When the stress test ended, `sv_active` dropped to `0`
+and `sv_idle` filled to `30` — the backends stayed warm, ready to serve
+the next burst without paying for another SCRAM handshake.
+
 ## Tuning for large connection counts
 
 Poolsmith is designed to keep server-side connections small while accepting
