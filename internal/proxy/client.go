@@ -800,21 +800,45 @@ func filterStartupParams(in map[string]string) map[string]string {
 	return out
 }
 
-// startupParamsSig returns a stable 16-hex-digit signature for a startup
-// params map. Empty map → empty string (signals the default pool).
+// stickyParamNames are the startup parameters that materially change session
+// semantics. Backends with different values for any of these can't be shared
+// — search_path selects schemas, client_encoding converts bytes, TimeZone
+// rewrites TIMESTAMPTZ, options can carry arbitrary -c flags, etc.
+//
+// Parameters NOT in this set (application_name, user-agent-ish fields) are
+// forwarded to upstream but do not partition the pool. That keeps the
+// multiplexing tight even when apps per-pod send a unique application_name.
+var stickyParamNames = map[string]struct{}{
+	"search_path":                 {},
+	"options":                     {},
+	"client_encoding":             {},
+	"datestyle":                   {},
+	"intervalstyle":               {},
+	"timezone":                    {},
+	"extra_float_digits":          {},
+	"bytea_output":                {},
+	"standard_conforming_strings": {},
+	"default_transaction_isolation": {},
+	"default_transaction_read_only": {},
+}
+
+// startupParamsSig returns a stable 16-hex-digit signature for the subset of
+// startup parameters that matter for pool sharing. Empty when every param in
+// the input is volatile (application_name etc.).
 func startupParamsSig(m map[string]string) string {
-	if len(m) == 0 {
-		return ""
-	}
 	keys := make([]string, 0, len(m))
 	for k := range m {
-		keys = append(keys, k)
+		if _, ok := stickyParamNames[strings.ToLower(k)]; ok {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
 	}
 	sort.Strings(keys)
 	h := fnv.New64a()
 	for _, k := range keys {
-		_, _ = h.Write([]byte(k))
-		_ = h.Sum64() // no-op; just makes the read clearer
+		_, _ = h.Write([]byte(strings.ToLower(k)))
 		_, _ = h.Write([]byte{0})
 		_, _ = h.Write([]byte(m[k]))
 		_, _ = h.Write([]byte{0})
