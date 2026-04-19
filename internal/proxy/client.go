@@ -6,8 +6,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -129,16 +131,18 @@ func (p *Proxy) handleClient(rawConn net.Conn) {
 
 	// 7. Main session loop.
 	sess := &session{
-		p:         p,
-		conn:      conn,
-		cr:        cr,
-		cw:        cw,
-		user:      user,
-		dbName:    dbName,
-		db:        db,
-		registry:  prepared.NewClientRegistry(),
-		statsKey:  dbName + "/" + user,
+		p:             p,
+		conn:          conn,
+		cr:            cr,
+		cw:            cw,
+		user:          user,
+		dbName:        dbName,
+		db:            db,
+		registry:      prepared.NewClientRegistry(),
+		statsKey:      dbName + "/" + user,
+		startupParams: filterStartupParams(sp.Params),
 	}
+	sess.startupSig = startupParamsSig(sess.startupParams)
 	if err := sess.run(); err != nil && !isEOF(err) {
 		p.log.Warn("client: session ended with error", "err", err, "user", user, "db", dbName)
 	}
@@ -327,6 +331,13 @@ type session struct {
 	// protocol. When set, handleBind/handleDescribeOrClose/handleExecute
 	// synthesize local responses instead of forwarding.
 	extAdmin string
+
+	// Client-supplied startup parameters (search_path, options, TimeZone,
+	// …) forwarded verbatim to upstream backends. startupSig is the stable
+	// hash used as the Params component of pool.Key so clients with
+	// different startup state don't share backends.
+	startupParams map[string]string
+	startupSig    string
 }
 
 // releaseBackend returns the current backend to its pool (or closes it if
@@ -336,7 +347,7 @@ func (s *session) releaseBackend() {
 		return
 	}
 	s.backendSet = nil
-	pl, err := s.p.poolFor(pool.Key{Server: s.backend.Server.Name, Database: s.dbName, User: s.user}, s.db)
+	pl, err := s.p.poolFor(pool.Key{Server: s.backend.Server.Name, Database: s.dbName, User: s.user, Params: s.startupSig}, s.db, s.startupParams)
 	if err != nil {
 		_ = s.backend.Close()
 		s.backend = nil
@@ -365,8 +376,8 @@ func (s *session) ensureBackend(r classify.Route) error {
 	}
 
 	serverName := s.pickServer(r)
-	k := pool.Key{Server: serverName, Database: s.dbName, User: s.user}
-	pl, err := s.p.poolFor(k, s.db)
+	k := pool.Key{Server: serverName, Database: s.dbName, User: s.user, Params: s.startupSig}
+	pl, err := s.p.poolFor(k, s.db, s.startupParams)
 	if err != nil {
 		return err
 	}
@@ -772,6 +783,43 @@ func isReadOnlyAdminQuery(sql string) bool {
 		}
 	}
 	return false
+}
+
+// filterStartupParams keeps only parameters that are safe to forward to the
+// upstream server. user and database are fixed by the pool Key; replication
+// is never supported through Poolsmith.
+func filterStartupParams(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		lk := strings.ToLower(k)
+		if lk == "user" || lk == "database" || lk == "replication" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// startupParamsSig returns a stable 16-hex-digit signature for a startup
+// params map. Empty map → empty string (signals the default pool).
+func startupParamsSig(m map[string]string) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	h := fnv.New64a()
+	for _, k := range keys {
+		_, _ = h.Write([]byte(k))
+		_ = h.Sum64() // no-op; just makes the read clearer
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(m[k]))
+		_, _ = h.Write([]byte{0})
+	}
+	return fmt.Sprintf("%016x", h.Sum64())
 }
 
 func isEOF(err error) bool {

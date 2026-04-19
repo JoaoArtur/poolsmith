@@ -13,22 +13,34 @@ import (
 	"github.com/JoaoArtur/poolsmith/internal/metrics"
 )
 
-// Key identifies a Pool uniquely: (server logical name, client-facing db, user).
-// Backends are fungible within a Key but never across Keys — they were
-// authenticated with specific credentials.
+// Key identifies a Pool uniquely: (server logical name, client-facing db,
+// user, startup-params signature). Backends are fungible within a Key but
+// never across Keys — different credentials or startup parameters force a
+// separate pool so backends aren't reused with the wrong session state.
 type Key struct {
 	Server   string
 	Database string
 	User     string
+	// Params is an opaque signature of the startup parameters that created
+	// the pool (empty string = no extras). Two clients whose `options=` or
+	// `search_path=` differ get distinct pools.
+	Params string
 }
 
 // String returns a flat key for maps / logs.
-func (k Key) String() string { return k.Server + "/" + k.Database + "/" + k.User }
+func (k Key) String() string {
+	s := k.Server + "/" + k.Database + "/" + k.User
+	if k.Params != "" {
+		s += "#" + k.Params
+	}
+	return s
+}
 
 // ConnectFunc is supplied by the caller (proxy/session) and encapsulates
-// the dial + TLS + auth flow for one backend. This keeps the pool package
-// free of auth/TLS dependencies.
-type ConnectFunc func(ctx context.Context, k Key) (*Backend, error)
+// the dial + TLS + auth flow for one backend. Params carries the startup
+// parameters the pool was opened with; ConnectFunc is expected to forward
+// them on the upstream StartupMessage.
+type ConnectFunc func(ctx context.Context, k Key, params map[string]string) (*Backend, error)
 
 // Pool manages authenticated backends for one (server, db, user) triple.
 // Safe for concurrent use.
@@ -44,6 +56,7 @@ type Pool struct {
 	ConnectTimeout time.Duration
 
 	connect ConnectFunc
+	params  map[string]string
 	log     *logger.Logger
 	m       *metrics.Registry
 
@@ -67,6 +80,7 @@ type Options struct {
 	MaxLifetime    time.Duration
 	ConnectTimeout time.Duration
 	Connect        ConnectFunc
+	Params         map[string]string // forwarded to upstream StartupMessage
 	Logger         *logger.Logger
 	Metrics        *metrics.Registry
 }
@@ -95,6 +109,7 @@ func New(o Options) *Pool {
 		MaxLifetime:    o.MaxLifetime,
 		ConnectTimeout: o.ConnectTimeout,
 		connect:        o.Connect,
+		params:         o.Params,
 		log:            o.Logger,
 		m:              o.Metrics,
 		all:            map[uint64]*Backend{},
@@ -295,7 +310,7 @@ func (p *Pool) dial(ctx context.Context) (*Backend, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.ConnectTimeout)
 	defer cancel()
-	b, err := p.connect(ctx, p.Key)
+	b, err := p.connect(ctx, p.Key, p.params)
 	if err != nil {
 		return nil, fmt.Errorf("pool: connect %s: %w", p.Key, err)
 	}

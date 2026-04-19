@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -189,8 +190,11 @@ var _ admin.Registry = (*Proxy)(nil)
 
 // ---- client handler is in client.go ----
 
-// poolFor returns (or creates) the pool for (server, database, user).
-func (p *Proxy) poolFor(k pool.Key, db *config.Database) (*pool.Pool, error) {
+// poolFor returns (or creates) the pool for (server, database, user, params).
+// extraParams is forwarded to the upstream StartupMessage so search_path,
+// options, DateStyle, TimeZone, etc. set by the client at connect time
+// propagate to every backend the pool opens.
+func (p *Proxy) poolFor(k pool.Key, db *config.Database, extraParams map[string]string) (*pool.Pool, error) {
 	p.mu.RLock()
 	pl, ok := p.pools[k]
 	p.mu.RUnlock()
@@ -221,6 +225,7 @@ func (p *Proxy) poolFor(k pool.Key, db *config.Database) (*pool.Pool, error) {
 		MaxLifetime:    p.cfg.ServerLifetime,
 		ConnectTimeout: p.cfg.ServerConnectTimeout,
 		Connect:        p.connectBackend(srv, db),
+		Params:         extraParams,
 		Logger:         p.log,
 		Metrics:        p.metrics,
 	})
@@ -230,8 +235,8 @@ func (p *Proxy) poolFor(k pool.Key, db *config.Database) (*pool.Pool, error) {
 
 // connectBackend returns a ConnectFunc bound to the given server+database.
 func (p *Proxy) connectBackend(srv *config.Server, db *config.Database) pool.ConnectFunc {
-	return func(ctx context.Context, k pool.Key) (*pool.Backend, error) {
-		p.log.Debug("proxy: dialing upstream", "server", srv.Name, "host", srv.Host, "port", srv.Port, "db", db.UpstreamName, "user", k.User)
+	return func(ctx context.Context, k pool.Key, extraParams map[string]string) (*pool.Backend, error) {
+		p.log.Debug("proxy: dialing upstream", "server", srv.Name, "host", srv.Host, "port", srv.Port, "db", db.UpstreamName, "user", k.User, "extra_params", extraParams)
 		b, err := pool.NewBackend(ctx, srv, db.UpstreamName, k.User, p.cfg.ServerConnectTimeout)
 		if err != nil {
 			return nil, err
@@ -252,10 +257,17 @@ func (p *Proxy) connectBackend(srv *config.Server, db *config.Database) pool.Con
 			}
 		}
 
-		// Startup
-		if err := b.SendStartup(map[string]string{
-			"application_name": "poolsmith",
-		}); err != nil {
+		// Startup — forward every client-provided startup param except the
+		// ones that identify the server-side session itself.
+		start := map[string]string{"application_name": "poolsmith"}
+		for key, val := range extraParams {
+			lk := strings.ToLower(key)
+			if lk == "user" || lk == "database" || lk == "replication" {
+				continue
+			}
+			start[key] = val
+		}
+		if err := b.SendStartup(start); err != nil {
 			_ = b.Close()
 			return nil, err
 		}
